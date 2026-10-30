@@ -25,6 +25,23 @@ import streamlit.components.v1 as components
 st.set_page_config(page_title="Medora AI", page_icon="🩺", layout="wide",
                    initial_sidebar_state="expanded")
 
+# Load local .env for development, and Streamlit Secrets on Community Cloud.
+# Set the environment variable BEFORE importing medora_ai, because its OpenAI
+# client reads OPENAI_API_KEY from the process environment.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+try:
+    _streamlit_api_key = st.secrets.get("OPENAI_API_KEY", "")
+except Exception:
+    _streamlit_api_key = ""
+
+if _streamlit_api_key:
+    os.environ["OPENAI_API_KEY"] = str(_streamlit_api_key).strip()
+
 _loading = st.empty()
 _loading.info("Loading Medora AI… (first start can take a few seconds)")
 try:
@@ -743,8 +760,8 @@ with st.sidebar:
                 auth.sign_out()
 
 if not os.getenv("OPENAI_API_KEY"):
-    st.warning("OPENAI_API_KEY was not found. Add `OPENAI_API_KEY=sk-...` to a `.env` file "
-               "next to app.py, then restart Streamlit.")
+    st.error("OPENAI_API_KEY is missing. Add it to Streamlit App Settings → Secrets "
+             "as OPENAI_API_KEY = \"your-key\" and reboot the app.")
 if flash := st.session_state.pop("flash", None):
     st.error(flash)
 
@@ -1007,7 +1024,7 @@ def render_insights() -> None:
     else:
         next_cls, next_txt = "", f"Ask about a value in {chat['files'][-1]['name']}."
     kb_on = bool(medora.KNOWLEDGE_BASE_VECTOR_STORE_ID)
-    skill_on = bool(medora.SKILL_ID and medora.SKILL_MODEL)
+    skill_on = bool(medora.SKILL_ID)
 
     h('<div class="ins-title">Insights</div>')
     h(f'<div class="ins-next {next_cls}"><div class="k">Next step</div><div class="v">{esc(next_txt)}</div></div>')
@@ -1053,9 +1070,8 @@ def handle_text_turn(prompt: str) -> None:
             if st.session_state.read_aloud:
                 try:
                     audio = run_in_worker(medora.synthesize_speech, reply, voice=current_voice())
-                except Exception:
-                    # Text answer remains available even if speech synthesis fails.
-                    st.toast("Could not create spoken audio for this reply. The text answer is still available.", icon="⚠️")
+                except Exception as exc:
+                    st.toast(f"Text-to-speech failed: {exc}", icon="⚠️")
     chat["messages"].append(make_message("assistant", reply, images=images, audio=audio,
                                          emergency=emergency, agent=agent))
     if audio:
@@ -1072,26 +1088,19 @@ def handle_voice_turn(audio_bytes: bytes, filename: str, content_type: str) -> N
                     medora.process_voice_message, audio_bytes=audio_bytes, session_id=chat["id"],
                     filename=filename, content_type=content_type, language=current_lang(),
                     uploaded_vector_store_id=chat["vs_id"], voice=current_voice())
-            except Exception:
-                st.session_state.flash = (
-                    "Voice processing failed. Please try recording again or type your message. "
-                    "If the problem continues, check the app server logs."
-                )
+            except Exception as exc:
+                st.session_state.flash = f"Voice message failed: {exc}"
                 return
-    transcript = result.get("transcript", "").strip()
-    if not transcript:
-        st.session_state.flash = "No speech was detected. Please record a clearer message or type your question."
-        return
-    reply, images = extract_images(result.get("response_text", "Sorry, I could not generate a response."))
+    transcript = result["transcript"]
+    reply, images = extract_images(result["response_text"])
     emergency = medora.looks_like_emergency(transcript)
     if chat["title"] == "New chat":
         chat["title"] = transcript[:40]
     chat["messages"].append(make_message("user", f"🎙️ {transcript}"))
     chat["messages"].append(make_message(
-        "assistant", reply, images=images, audio=result.get("audio_bytes"), emergency=emergency,
+        "assistant", reply, images=images, audio=result["audio_bytes"], emergency=emergency,
         agent=agent_label(getattr(medora, "LAST_AGENT_NAME", None), images, emergency)))
-    if result.get("audio_bytes"):
-        st.session_state.autoplay = (chat["id"], len(chat["messages"]) - 1)
+    st.session_state.autoplay = (chat["id"], len(chat["messages"]) - 1)
     auth.save_chat(UID, chat)
 
 
